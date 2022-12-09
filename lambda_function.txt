@@ -1,0 +1,110 @@
+from aws_lambda_powertools import Tracer
+from aws_lambda_powertools import Logger
+from aws_lambda_powertools.utilities.typing import LambdaContext
+from aws_lambda_powertools.utilities.data_classes import event_source, EventBridgeEvent
+
+import json
+import boto3
+from datetime import datetime
+
+tracer = Tracer(service="operacoes")
+logger = Logger()
+sqs = boto3.client("sqs")
+sqs_queue_endpoint = "https://sqs.us-east-1.amazonaws.com/xxxxxxxxxxx/operacoes"
+evb = boto3.client("events")
+evb_eventbus_arn = "arn:aws:events:us-east-1: xxxxxxxxxxx:event-bus/operacoes"
+
+def sqs_send_message_batch(batch):
+    result = []
+    
+    for x in range(batch):
+        now = datetime.now()
+        current_time = now.strftime("%H-%M-%S-%f")
+        entries_list=[]
+        
+        for z in range(10):
+            message_body = {
+                "MessageBody":f"{current_time}",
+                "Id":f"{current_time}-{x}-{z}"
+            }
+            entries_list.append(message_body)
+
+        response = sqs.send_message_batch(
+            QueueUrl=sqs_queue_endpoint,
+            Entries=entries_list
+        )
+        
+        result.append(response)
+    return result
+
+def sqs_receive_message_batch(batch):
+    result = []
+    for x in range(batch):
+        response_receive = sqs.receive_message(
+            QueueUrl=sqs_queue_endpoint,
+            MaxNumberOfMessages=10
+        )
+
+        if "Messages" in response_receive:
+            response_eventbus = evb.put_events(Entries=[
+                {
+                    "Source": "com.romulo.operacoes",
+                    "DetailType": "send_message",
+                    "Detail": "{\"messages\":\"xxx-xx-xxxxx\"}",
+                    "EventBusName": evb_eventbus_arn
+                }])
+            
+            response_delete = sqs_delete_message_batch(response_receive["Messages"])
+            
+            result.append({
+                "receive": len(response_receive["Messages"]),
+                "eventbus": {
+                    "FailedEntryCount": response_eventbus["FailedEntryCount"],
+                    "Entries": len(response_eventbus["Entries"])
+                },
+                "delete": len(response_delete["Successful"])
+            })
+            
+    logger.info(f"sqs_receive_message_batch={result}")
+    return result
+
+def sqs_delete_message_batch(messages_list):
+    entries_list=[]
+    for message in messages_list:
+        entries = { 
+            "Id" : message["MessageId"],
+            "ReceiptHandle" : message["ReceiptHandle"]
+        }
+        entries_list.append(entries)
+        
+    response = sqs.delete_message_batch(
+            QueueUrl=sqs_queue_endpoint,
+            Entries=entries_list
+        )
+    return response
+
+@tracer.capture_lambda_handler
+@logger.inject_lambda_context(log_event=True)
+#@event_source(data_class=EventBridgeEvent)
+#def lambda_handler(event: EventBridgeEvent, context: LambdaContext):
+def lambda_handler(event, context: LambdaContext):
+
+    if "batch" in event:
+        result1 = sqs_receive_message_batch(10)
+        logger.info(f"Mensagens Recebidas e Deletadas {result1}" )
+        
+        #for x in result1:
+        #    if x["receive"]:
+        #    if "receive" in result1: 
+    
+        result2 = sqs_send_message_batch(10)
+        logger.info(f"Mensagens Criadas {result2}" )
+        
+        if "Successful" in result2:
+            qtde_msg_criadas = len(result2["Successful"])
+            logger.info(f"Qtde Mensagens Criadas {qtde_msg_criadas}" )
+
+    return {
+        "statusCode": 200,
+        "body": event
+    }
